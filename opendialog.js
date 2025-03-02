@@ -34,8 +34,8 @@ function openConfiguredForm(executionContext) {
 
                 // Open the retrieved form
                 var entityFormOptions = {
-                    entityName: "case",
-                    formId: configuredFormId
+                    entityName: "your_configuration_entity", // Logical name of Configuration entity
+                    entityId: configRecordId // Open existing record
                 };
 
                 Xrm.Navigation.openForm(entityFormOptions).then(
