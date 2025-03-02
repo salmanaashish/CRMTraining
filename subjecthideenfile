@@ -1,0 +1,30 @@
+function hideButtonBasedOnSubject(executionContext) {
+    var formContext = executionContext.getFormContext();
+
+    // Get Subject Lookup field
+    var subjectLookup = formContext.getAttribute("subjectid"); 
+    if (!subjectLookup || subjectLookup.getValue() === null) {
+        return false; // Hide button if no subject is selected
+    }
+
+    var subjectName = subjectLookup.getValue()[0].name; // Get the Subject Name
+
+    // Query Entity Configuration entity to check if the subject name exists
+    var fetchQuery = `/api/data/v9.0/entityconfigurations?$filter=subjectname eq '${subjectName}'&$top=1`;
+
+    return new Promise(function (resolve, reject) {
+        Xrm.WebApi.retrieveMultipleRecords("entityconfiguration", fetchQuery).then(
+            function (result) {
+                if (result.entities.length === 0) {
+                    resolve(false); // Hide the button if Subject Name not found
+                } else {
+                    resolve(true); // Show the button if Subject Name exists
+                }
+            },
+            function (error) {
+                console.log("Error retrieving Entity Configuration:", error.message);
+                resolve(false); // Hide the button in case of an error
+            }
+        );
+    });
+}
