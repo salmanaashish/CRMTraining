@@ -6,7 +6,9 @@ function hideButtonBasedOnSubject(executionContext) {
     if (!subjectLookup || subjectLookup.getValue() === null) {
         return false; // Hide button if no subject is selected
     }
-
+ var query = `/your_configuration_entities?$select=your_configuration_entityid,your_form_id_field
+                 &$filter=your_subject_field eq ${subjectId} and your_form_id_field eq ${formId}
+                 &$top=1`;
     var subjectName = subjectLookup.getValue()[0].name; // Get the Subject Name
 
     // Query Entity Configuration entity to check if the subject name exists
