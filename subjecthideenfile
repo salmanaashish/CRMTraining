@@ -30,3 +30,17 @@ function hideButtonBasedOnSubject(executionContext) {
         );
     });
 }
+
+
+// Check if the Subject Lookup field has a value
+If(
+    IsBlank(SubjectId), 
+    false, // Hide button if no subject is selected
+    // Query the Entity Configuration table
+    !IsEmpty(
+        LookUp(
+            entityconfigurations,
+            subjectname = LookUp(subjects, subjectid = SubjectId, subjectname)
+        )
+    ) 
+)
