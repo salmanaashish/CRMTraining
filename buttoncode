@@ -1,0 +1,48 @@
+function openQuickCreateFromSelectedRecord(entityName, selectedItems, primaryControl) {
+    var recordId = null;
+    var recordName = "Related Record"; // Default name if not available
+    var recordEntityType = "account"; // 👈 Change this to the entity type of selected record (e.g., account, lead, etc.)
+
+    // If from Grid
+    if (selectedItems && selectedItems.length > 0) {
+        recordId = selectedItems[0].replace("{", "").replace("}", "");
+    }
+
+    // If from Form
+    if (!recordId && primaryControl) {
+        recordId = primaryControl.data.entity.getId().replace("{", "").replace("}", "");
+        recordName = primaryControl.data.entity.getPrimaryAttributeValue();
+        recordEntityType = primaryControl.data.entity.getEntityName(); // auto-detect entity type
+    }
+
+    if (!recordId) {
+        alert("No record selected.");
+        return;
+    }
+
+    var formParameters = {
+        "new_parentaccount": {
+            id: recordId,
+            name: recordName,
+            entityType: recordEntityType
+        }
+    };
+
+    var entityFormOptions = {
+        entityName: entityName,
+        useQuickCreateForm: true
+    };
+
+    Xrm.Navigation.openForm(entityFormOptions, formParameters).then(
+        function (result) {
+            if (result && result.savedEntityReference) {
+                console.log("Quick Create Success: ", result.savedEntityReference);
+            } else {
+                console.log("Quick Create Form closed without saving.");
+            }
+        },
+        function (error) {
+            console.error("Error opening Quick Create Form: ", error.message);
+        }
+    );
+}
