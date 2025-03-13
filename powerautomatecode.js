@@ -1,1 +1,1 @@
-if(equals(variables('test'), null), null, concat('/account(', variables('test'), ')'))
+if(empty(variables('test')), null, concat('/account(', variables('test'), ')'))
