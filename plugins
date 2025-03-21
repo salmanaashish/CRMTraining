@@ -1,0 +1,88 @@
+using System;
+using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
+
+public class GeneralEnquiryCaseSyncPlugin : IPlugin
+{
+    public void Execute(IServiceProvider serviceProvider)
+    {
+        // Tracing service
+        ITracingService tracingService = (ITracingService)serviceProvider.GetService(typeof(ITracingService));
+        
+        // Plugin context
+        IPluginExecutionContext context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
+        
+        // Organization service
+        IOrganizationServiceFactory serviceFactory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
+        IOrganizationService service = serviceFactory.CreateOrganizationService(context.UserId);
+
+        try
+        {
+            if (context.InputParameters.Contains("Target") && context.InputParameters["Target"] is Entity entity)
+            {
+                tracingService.Trace("General Enquiry Plugin Triggered.");
+
+                // Get fields from General Enquiry
+                EntityReference account = entity.Contains("zen-account") ? entity.GetAttributeValue<EntityReference>("zen-account") : null;
+                EntityReference requestor = entity.Contains("zen-requestorid") ? entity.GetAttributeValue<EntityReference>("zen-requestorid") : null;
+                EntityReference subject = entity.Contains("zen-subjectid") ? entity.GetAttributeValue<EntityReference>("zen-subjectid") : null;
+                string title = entity.Contains("zen-title") ? entity.GetAttributeValue<string>("zen-title") : null;
+                EntityReference vehicle = entity.Contains("zen-vehicleid") ? entity.GetAttributeValue<EntityReference>("zen-vehicleid") : null;
+                EntityReference vehicleOrder = entity.Contains("zen-vehicleorderid") ? entity.GetAttributeValue<EntityReference>("zen-vehicleorderid") : null;
+                EntityReference driver = entity.Contains("zen-driver") ? entity.GetAttributeValue<EntityReference>("zen-driver") : null;
+
+                // Check if Case exists using a sample logic (modify per your actual matching logic)
+                QueryExpression query = new QueryExpression("incident")
+                {
+                    ColumnSet = new ColumnSet("incidentid"),
+                    Criteria =
+                    {
+                        Conditions =
+                        {
+                            new ConditionExpression("customerid", ConditionOperator.Equal, account?.Id)
+                        }
+                    }
+                };
+
+                EntityCollection cases = service.RetrieveMultiple(query);
+
+                if (cases.Entities.Count > 0)
+                {
+                    // Update existing Case
+                    Entity existingCase = new Entity("incident", cases.Entities[0].Id);
+                    tracingService.Trace("Updating existing Case: " + existingCase.Id);
+
+                    if (requestor != null) existingCase["zen-requestorid"] = requestor;
+                    if (subject != null) existingCase["zen-subjectid"] = subject;
+                    if (!string.IsNullOrEmpty(title)) existingCase["title"] = title;
+                    if (vehicle != null) existingCase["zen-vehicleid"] = vehicle;
+                    if (vehicleOrder != null) existingCase["zen-vehicleorderid"] = vehicleOrder;
+                    if (driver != null) existingCase["zen-driver"] = driver;
+
+                    service.Update(existingCase);
+                }
+                else
+                {
+                    // Create new Case
+                    Entity newCase = new Entity("incident");
+                    tracingService.Trace("Creating new Case record.");
+
+                    if (account != null) newCase["customerid"] = account;
+                    if (requestor != null) newCase["zen-requestorid"] = requestor;
+                    if (subject != null) newCase["zen-subjectid"] = subject;
+                    if (!string.IsNullOrEmpty(title)) newCase["title"] = title;
+                    if (vehicle != null) newCase["zen-vehicleid"] = vehicle;
+                    if (vehicleOrder != null) newCase["zen-vehicleorderid"] = vehicleOrder;
+                    if (driver != null) newCase["zen-driver"] = driver;
+
+                    service.Create(newCase);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            tracingService.Trace("Exception: " + ex.ToString());
+            throw new InvalidPluginExecutionException("An error occurred in GeneralEnquiryCaseSyncPlugin.", ex);
+        }
+    }
+}
