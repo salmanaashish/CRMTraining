@@ -1,0 +1,45 @@
+using System;
+using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
+
+public class ValidateOpportunityStatus : IPlugin
+{
+    public void Execute(IServiceProvider serviceProvider)
+    {
+        ITracingService tracingService = (ITracingService)serviceProvider.GetService(typeof(ITracingService));
+        IPluginExecutionContext context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
+        IOrganizationServiceFactory serviceFactory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
+        IOrganizationService service = serviceFactory.CreateOrganizationService(context.UserId);
+
+        try
+        {
+            if (context.InputParameters.Contains("Target") && context.InputParameters["Target"] is Entity entity)
+            {
+                if (entity.LogicalName != "opportunity") return;
+
+                OptionSetValue newStatusCode = entity.GetAttributeValue<OptionSetValue>("statuscode");
+                if (newStatusCode == null) return;
+
+                // Status Reason values - update with your environment’s actual values
+                const int STATUS_LOST = 4;      // e.g., Lost
+                const int STATUS_CANCELED = 5;  // e.g., Canceled
+
+                if (newStatusCode.Value == STATUS_LOST || newStatusCode.Value == STATUS_CANCELED)
+                {
+                    // Perform your validation logic here
+                    // For example: Check if reason field is filled
+                    string reason = entity.GetAttributeValue<string>("new_lostreason");
+                    if (string.IsNullOrWhiteSpace(reason))
+                    {
+                        throw new InvalidPluginExecutionException("Please provide a reason before marking the Opportunity as Lost or Canceled.");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            tracingService.Trace("ValidateOpportunityStatus Plugin: {0}", ex.ToString());
+            throw new InvalidPluginExecutionException("An error occurred in ValidateOpportunityStatus plugin.", ex);
+        }
+    }
+}
