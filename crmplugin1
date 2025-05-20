@@ -1,10 +1,7 @@
 using System;
-using System.Linq;
 using System.ServiceModel;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Query;
-using Microsoft.Xrm.Sdk.Messages;
-using Microsoft.Xrm.Sdk.Metadata;
 
 namespace YourNamespace.Plugins
 {
@@ -12,13 +9,8 @@ namespace YourNamespace.Plugins
     {
         public void Execute(IServiceProvider serviceProvider)
         {
-            // Get the tracing service
             ITracingService tracingService = (ITracingService)serviceProvider.GetService(typeof(ITracingService));
-            
-            // Get the execution context
             IPluginExecutionContext context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
-
-            // Get the organization service
             IOrganizationServiceFactory serviceFactory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
             IOrganizationService service = serviceFactory.CreateOrganizationService(context.UserId);
 
@@ -26,129 +18,106 @@ namespace YourNamespace.Plugins
             {
                 tracingService.Trace("QuoteProductPlugin execution started.");
 
-                // Check if the plugin is running in the correct message and stage
+                // Validate execution context
                 if (context.MessageName.ToLower() != "create" && context.MessageName.ToLower() != "update")
                 {
                     tracingService.Trace($"Invalid message: {context.MessageName}. Plugin will exit.");
                     return;
                 }
 
-                // Check if the target entity is a quote detail (product)
-                if (context.InputParameters.Contains("Target") && context.InputParameters["Target"] is Entity)
+                if (!(context.InputParameters.Contains("Target") && context.InputParameters["Target"] is Entity))
                 {
-                    Entity quoteProduct = (Entity)context.InputParameters["Target"];
-                    tracingService.Trace("Quote product entity retrieved.");
+                    tracingService.Trace("Invalid target entity. Plugin will exit.");
+                    return;
+                }
 
-                    // Verify the entity is quote detail
-                    if (quoteProduct.LogicalName != "quotedetail")
+                Entity quoteProduct = (Entity)context.InputParameters["Target"];
+                if (quoteProduct.LogicalName != "quotedetail")
+                {
+                    tracingService.Trace("Target is not a quote detail. Plugin will exit.");
+                    return;
+                }
+
+                // Get the quote ID from the quote product
+                if (!quoteProduct.Contains("quoteid"))
+                {
+                    tracingService.Trace("Quote product doesn't have a quote ID. Plugin will exit.");
+                    return;
+                }
+
+                EntityReference quoteRef = quoteProduct.GetAttributeValue<EntityReference>("quoteid");
+                tracingService.Trace($"Processing quote product for quote ID: {quoteRef.Id}");
+
+                // Retrieve the quote with customer (account) information
+                Entity quote = service.Retrieve("quote", quoteRef.Id, new ColumnSet("customerid", "opportunityid"));
+                tracingService.Trace("Quote retrieved successfully.");
+
+                if (quote == null)
+                {
+                    tracingService.Trace("Quote not found. Plugin will exit.");
+                    return;
+                }
+
+                // Initialize update object
+                Entity updateQuoteProduct = new Entity("quotedetail", quoteProduct.Id);
+                bool needsUpdate = false;
+
+                // 1. ACCOUNT MAPPING - Primary logic for account mapping
+                if (quote.Contains("customerid"))
+                {
+                    EntityReference customerRef = quote.GetAttributeValue<EntityReference>("customerid");
+                    
+                    // Only process if customer is an account (not contact)
+                    if (customerRef.LogicalName == "account")
                     {
-                        tracingService.Trace("Target is not a quote detail. Plugin will exit.");
-                        return;
-                    }
+                        tracingService.Trace($"Found account reference in quote: {customerRef.Id}");
 
-                    // Get the quote ID from the quote product
-                    if (!quoteProduct.Contains("quoteid"))
-                    {
-                        tracingService.Trace("Quote product doesn't have a quote ID. Plugin will exit.");
-                        return;
-                    }
-
-                    EntityReference quoteRef = quoteProduct.GetAttributeValue<EntityReference>("quoteid");
-                    tracingService.Trace($"Processing quote product for quote ID: {quoteRef.Id}");
-
-                    // Retrieve the full quote with account information
-                    Entity quote = service.Retrieve("quote", quoteRef.Id, new ColumnSet("customerid", "opportunityid"));
-                    tracingService.Trace("Quote retrieved successfully.");
-
-                    if (quote == null)
-                    {
-                        tracingService.Trace("Quote not found. Plugin will exit.");
-                        return;
-                    }
-
-                    string cloudEmail = string.Empty;
-
-                    // Check if the quote has a customer (account)
-                    if (quote.Contains("customerid"))
-                    {
-                        EntityReference customerRef = quote.GetAttributeValue<EntityReference>("customerid");
-                        tracingService.Trace($"Customer (account/contact) found: {customerRef.LogicalName}, ID: {customerRef.Id}");
-
-                        // We're only interested in accounts (not contacts)
-                        if (customerRef.LogicalName == "account")
+                        // Check if account reference needs to be updated in quote product
+                        if (!quoteProduct.Contains("new_account") || 
+                            quoteProduct.GetAttributeValue<EntityReference>("new_account")?.Id != customerRef.Id)
                         {
-                            // Get account with cloud email field
-                            Entity account = service.Retrieve("account", customerRef.Id, new ColumnSet("new_cloudemail"));
-                            tracingService.Trace("Account retrieved successfully.");
+                            updateQuoteProduct["new_account"] = customerRef;
+                            needsUpdate = true;
+                            tracingService.Trace("Account reference will be updated in quote product.");
+                        }
 
-                            if (account != null && account.Contains("new_cloudemail"))
-                            {
-                                cloudEmail = account.GetAttributeValue<string>("new_cloudemail");
-                                tracingService.Trace($"Cloud email found in account: {cloudEmail}");
-                            }
-                            else
-                            {
-                                tracingService.Trace("No cloud email in account, checking opportunity...");
-                                
-                                // If no cloud email in account, check the opportunity
-                                if (quote.Contains("opportunityid"))
-                                {
-                                    EntityReference opportunityRef = quote.GetAttributeValue<EntityReference>("opportunityid");
-                                    Entity opportunity = service.Retrieve("opportunity", opportunityRef.Id, new ColumnSet("new_cloudemail", "customerid"));
-                                    tracingService.Trace("Opportunity retrieved successfully.");
+                        // 2. CLOUD EMAIL LOGIC - Only proceed if we have account reference
+                        string cloudEmail = null;
+                        Entity account = service.Retrieve("account", customerRef.Id, new ColumnSet("new_cloudemail"));
+                        
+                        if (account != null && account.Contains("new_cloudemail"))
+                        {
+                            cloudEmail = account.GetAttributeValue<string>("new_cloudemail");
+                            tracingService.Trace($"Cloud email found in account: {cloudEmail}");
+                        }
+                        else if (quote.Contains("opportunityid"))
+                        {
+                            // Opportunity lookup logic remains the same
+                            cloudEmail = GetCloudEmailFromOpportunity(service, tracingService, 
+                                quote.GetAttributeValue<EntityReference>("opportunityid"));
+                        }
 
-                                    if (opportunity != null)
-                                    {
-                                        // First check if opportunity has cloud email
-                                        if (opportunity.Contains("new_cloudemail"))
-                                        {
-                                            cloudEmail = opportunity.GetAttributeValue<string>("new_cloudemail");
-                                            tracingService.Trace($"Cloud email found in opportunity: {cloudEmail}");
-                                        }
-                                        else
-                                        {
-                                            tracingService.Trace("No cloud email in opportunity, checking lead...");
-                                            
-                                            // If no cloud email in opportunity, check the originating lead
-                                            if (opportunity.Contains("customerid"))
-                                            {
-                                                EntityReference opportunityCustomerRef = opportunity.GetAttributeValue<EntityReference>("customerid");
-                                                
-                                                // Check if the customer is actually a lead (possible in some implementations)
-                                                if (opportunityCustomerRef.LogicalName == "lead")
-                                                {
-                                                    Entity lead = service.Retrieve("lead", opportunityCustomerRef.Id, new ColumnSet("new_cloudemail"));
-                                                    tracingService.Trace("Lead retrieved successfully.");
-
-                                                    if (lead != null && lead.Contains("new_cloudemail"))
-                                                    {
-                                                        cloudEmail = lead.GetAttributeValue<string>("new_cloudemail");
-                                                        tracingService.Trace($"Cloud email found in lead: {cloudEmail}");
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        // Update cloud email if found
+                        if (!string.IsNullOrEmpty(cloudEmail) &&
+                            (!quoteProduct.Contains("new_cloudemail") || 
+                             quoteProduct.GetAttributeValue<string>("new_cloudemail") != cloudEmail))
+                        {
+                            updateQuoteProduct["new_cloudemail"] = cloudEmail;
+                            needsUpdate = true;
+                            tracingService.Trace("Cloud email will be updated in quote product.");
                         }
                     }
+                }
 
-                    // If we found a cloud email, update the quote product
-                    if (!string.IsNullOrEmpty(cloudEmail))
-                    {
-                        tracingService.Trace($"Updating quote product with cloud email: {cloudEmail}");
-                        
-                        Entity updateQuoteProduct = new Entity("quotedetail", quoteProduct.Id);
-                        updateQuoteProduct["new_cloudemail"] = cloudEmail;
-                        
-                        service.Update(updateQuoteProduct);
-                        tracingService.Trace("Quote product updated successfully.");
-                    }
-                    else
-                    {
-                        tracingService.Trace("No cloud email found in account, opportunity, or lead.");
-                    }
+                // Perform the update if needed
+                if (needsUpdate)
+                {
+                    service.Update(updateQuoteProduct);
+                    tracingService.Trace("Quote product updated successfully with account and cloud email.");
+                }
+                else
+                {
+                    tracingService.Trace("No updates needed for quote product.");
                 }
             }
             catch (FaultException<OrganizationServiceFault> ex)
@@ -165,6 +134,39 @@ namespace YourNamespace.Plugins
             {
                 tracingService.Trace("QuoteProductPlugin execution completed.");
             }
+        }
+
+        private string GetCloudEmailFromOpportunity(IOrganizationService service, ITracingService tracingService, EntityReference opportunityRef)
+        {
+            if (opportunityRef == null) return null;
+
+            Entity opportunity = service.Retrieve("opportunity", opportunityRef.Id, 
+                new ColumnSet("new_cloudemail", "customerid"));
+            tracingService.Trace("Opportunity retrieved for cloud email lookup.");
+
+            if (opportunity == null) return null;
+
+            // Check opportunity directly for cloud email
+            if (opportunity.Contains("new_cloudemail"))
+            {
+                return opportunity.GetAttributeValue<string>("new_cloudemail");
+            }
+
+            // Check related lead if available
+            if (opportunity.Contains("customerid"))
+            {
+                EntityReference customerRef = opportunity.GetAttributeValue<EntityReference>("customerid");
+                if (customerRef.LogicalName == "lead")
+                {
+                    Entity lead = service.Retrieve("lead", customerRef.Id, new ColumnSet("new_cloudemail"));
+                    if (lead != null && lead.Contains("new_cloudemail"))
+                    {
+                        return lead.GetAttributeValue<string>("new_cloudemail");
+                    }
+                }
+            }
+
+            return null;
         }
     }
 }
