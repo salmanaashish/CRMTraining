@@ -1,0 +1,73 @@
+Remove Only Starting and Ending Commas in Power Automate
+If you want to remove only the first comma at the start and the last comma at the end (but preserve any commas in between), here's the cleanest solution:
+
+Method 1: Using Conditional Expressions
+if(
+  startsWith(variables('YourStringVariable'), ','),
+  substring(variables('YourStringVariable'), 1, length(variables('YourStringVariable'))),
+  variables('YourStringVariable')
+)
+Then for the trailing comma:
+
+if(
+  endsWith(variables('ResultFromAbove'), ','),
+  substring(variables('ResultFromAbove'), 0, sub(length(variables('ResultFromAbove')), 1)),
+  variables('ResultFromAbove')
+)
+Method 2: Combined in a Single Expression
+if(
+  endsWith(
+    if(
+      startsWith(variables('YourStringVariable'), ','),
+      substring(variables('YourStringVariable'), 1, length(variables('YourStringVariable'))),
+      variables('YourStringVariable')
+    ),
+  ','),
+  substring(
+    if(
+      startsWith(variables('YourStringVariable'), ','),
+      substring(variables('YourStringVariable'), 1, length(variables('YourStringVariable'))),
+      variables('YourStringVariable')
+    ),
+    0,
+    sub(length(
+      if(
+        startsWith(variables('YourStringVariable'), ','),
+        substring(variables('YourStringVariable'), 1, length(variables('YourStringVariable'))),
+        variables('YourStringVariable')
+      )
+    ), 1)
+  ),
+  if(
+    startsWith(variables('YourStringVariable'), ','),
+    substring(variables('YourStringVariable'), 1, length(variables('YourStringVariable'))),
+    variables('YourStringVariable')
+  )
+)
+Method 3: Simplified Using Variables (Recommended)
+First action: Remove starting comma
+
+if(startsWith(variables('InputString'), ','), 
+   substring(variables('InputString'), 1, length(variables('InputString'))), 
+   variables('InputString'))
+→ Store in variable TempString
+
+Second action: Remove ending comma
+
+if(endsWith(variables('TempString'), ','), 
+   substring(variables('TempString'), 0, sub(length(variables('TempString')), 1)), 
+   variables('TempString'))
+Examples:
+Input: ",test" → Output: "test"
+
+Input: "test," → Output: "test"
+
+Input: ",test,test," → Output: "test,test"
+
+Input: "test" → Output: "test" (unchanged)
+
+Input: ",test,test" → Output: "test,test"
+
+Input: "test,test," → Output: "test,test"
+
+This approach ensures only the very first and very last commas are removed, while preserving all commas within the string.
