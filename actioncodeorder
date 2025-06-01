@@ -1,0 +1,136 @@
+using System;
+using System.Linq;
+using System.Collections.Generic;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
+
+public class AddOrUpdateQuoteDetails : IPlugin
+{
+    public void Execute(IServiceProvider serviceProvider)
+    {
+        var context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
+        var factory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
+        var service = factory.CreateOrganizationService(context.UserId);
+
+        // Get input JSON string
+        string jsonInput = context.InputParameters["QuoteProductJson"] as string;
+
+        if (string.IsNullOrWhiteSpace(jsonInput))
+            return;
+
+        var quoteProducts = JsonSerializer.Deserialize<List<QuoteProduct>>(jsonInput);
+
+        foreach (var item in quoteProducts)
+        {
+            if (string.IsNullOrEmpty(item.Quote) || string.IsNullOrEmpty(item.ProductNumber))
+                continue;
+
+            Guid quoteId = Guid.Parse(item.Quote);
+            string productNumber = item.ProductNumber;
+
+            // STEP 1: Fetch product by productnumber
+            var productFetch = $@"
+                <fetch top='1'>
+                  <entity name='product'>
+                    <attribute name='productid'/>
+                    <filter>
+                      <condition attribute='productnumber' operator='eq' value='{productNumber}' />
+                    </filter>
+                  </entity>
+                </fetch>";
+
+            var productResult = service.RetrieveMultiple(new FetchExpression(productFetch));
+            if (!productResult.Entities.Any())
+                continue;
+
+            var productId = productResult.Entities.First().Id;
+
+            // STEP 2: Check for quotedetail with hme_recordstarting = 1
+            var startLineFetch = $@"
+                <fetch top='1'>
+                  <entity name='quotedetail'>
+                    <attribute name='quotedetailid' />
+                    <filter>
+                      <condition attribute='quoteid' operator='eq' value='{quoteId}' />
+                      <condition attribute='hme_recordstarting' operator='eq' value='1' />
+                    </filter>
+                  </entity>
+                </fetch>";
+
+            var startLineResult = service.RetrieveMultiple(new FetchExpression(startLineFetch));
+
+            // STEP 3: Check if quotedetail with hme_recordstarting = 0 exists
+            var detailsFetch = $@"
+                <fetch>
+                  <entity name='quotedetail'>
+                    <attribute name='quotedetailid' />
+                    <attribute name='lineitemnumber' />
+                    <order attribute='createdon' descending='false' />
+                    <filter>
+                      <condition attribute='quoteid' operator='eq' value='{quoteId}' />
+                      <condition attribute='hme_recordstarting' operator='eq' value='0' />
+                    </filter>
+                  </entity>
+                </fetch>";
+
+            var detailsResult = service.RetrieveMultiple(new FetchExpression(detailsFetch));
+
+            int newLineNumber = item.LineNumber;
+
+            if (detailsResult.Entities.Any())
+            {
+                // Get last quotedetail and increment line number
+                var lastDetail = detailsResult.Entities.Last();
+                var lastLine = lastDetail.GetAttributeValue<int?>("lineitemnumber") ?? 0;
+                newLineNumber = lastLine + 1;
+
+                // Update existing quotedetail
+                var updateQuotedetail = new Entity("quotedetail", lastDetail.Id)
+                {
+                    ["lineitemnumber"] = newLineNumber
+                };
+                service.Update(updateQuotedetail);
+            }
+            else
+            {
+                // Create new quotedetail
+                var quotedetail = new Entity("quotedetail");
+                quotedetail["quoteid"] = new EntityReference("quote", quoteId);
+                quotedetail["productid"] = new EntityReference("product", productId);
+                quotedetail["productdescription"] = item.ProductName;
+                quotedetail["quantity"] = item.Quantity;
+                quotedetail["priceperunit"] = new Money(item.PricePerUnit);
+                quotedetail["lineitemnumber"] = newLineNumber;
+                quotedetail["hme_recordstarting"] = false;
+
+                service.Create(quotedetail);
+            }
+        }
+    }
+
+    public class QuoteProduct
+    {
+        [JsonPropertyName("linenumber")]
+        public int LineNumber { get; set; }
+
+        [JsonPropertyName("priceperunit")]
+        public decimal PricePerUnit { get; set; }
+
+        [JsonPropertyName("productname")]
+        public string ProductName { get; set; }
+
+        [JsonPropertyName("productnumber")]
+        public string ProductNumber { get; set; }
+
+        [JsonPropertyName("quantity")]
+        public int Quantity { get; set; }
+
+        [JsonPropertyName("quote")]
+        public string Quote { get; set; }
+
+        [JsonPropertyName("quotedetailname")]
+        public string QuoteDetailName { get; set; }
+    }
+}
