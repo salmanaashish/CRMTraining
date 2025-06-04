@@ -1,0 +1,83 @@
+public class ProcessQuoteDetailsPlugin : IPlugin
+{
+    public void Execute(IServiceProvider serviceProvider)
+    {
+        IPluginExecutionContext context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
+        IOrganizationServiceFactory factory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
+        IOrganizationService service = factory.CreateOrganizationService(context.UserId);
+
+        if (!context.InputParameters.Contains("QuoteDetailsJson"))
+            throw new InvalidPluginExecutionException("QuoteDetailsJson input parameter is missing.");
+
+        string jsonInput = context.InputParameters["QuoteDetailsJson"].ToString();
+        var newQuoteDetails = JsonConvert.DeserializeObject<List<QuoteDetailJson>>(jsonInput);
+        if (newQuoteDetails == null || newQuoteDetails.Count == 0)
+            throw new InvalidPluginExecutionException("Quote details JSON is empty or invalid.");
+
+        Guid quoteId = Guid.Parse(newQuoteDetails.First().quote);
+
+        // Fetch existing quote detail records for this quote
+        QueryExpression existingQuery = new QueryExpression("new_quotedetail")
+        {
+            ColumnSet = new ColumnSet("new_linenumber", "new_recordstarting"),
+            Criteria = new FilterExpression
+            {
+                Conditions = {
+                    new ConditionExpression("new_quoteid", ConditionOperator.Equal, quoteId)
+                }
+            },
+            Orders = { new OrderExpression("new_linenumber", OrderType.Descending) }
+        };
+
+        EntityCollection existingDetails = service.RetrieveMultiple(existingQuery);
+
+        // Find max line number
+        int maxLineNumber = existingDetails.Entities.Any()
+            ? existingDetails.Entities.Max(x => x.GetAttributeValue<int>("new_linenumber"))
+            : 0;
+
+        int insertCount = newQuoteDetails.Count;
+
+        // Update existing records (EXCLUDING recordstarting = true)
+        foreach (var record in existingDetails.Entities)
+        {
+            bool isStart = record.GetAttributeValue<bool>("new_recordstarting");
+            if (!isStart)
+            {
+                int currentLine = record.GetAttributeValue<int>("new_linenumber");
+                record["new_linenumber"] = currentLine + insertCount;
+                service.Update(record);
+            }
+        }
+
+        // Create new records
+        for (int i = 0; i < newQuoteDetails.Count; i++)
+        {
+            var item = newQuoteDetails[i];
+            Entity detail = new Entity("new_quotedetail");
+
+            detail["new_name"] = item.quotedetailname;
+            detail["new_quoteid"] = new EntityReference("quote", quoteId);
+            detail["new_productname"] = item.productname;
+            detail["new_productnumber"] = item.productnumber;
+            detail["new_priceperunit"] = new Money(item.priceperunit);
+            detail["new_quantity"] = item.quantity;
+            detail["new_linenumber"] = maxLineNumber + i + 1;
+            detail["new_recordstarting"] = (i == 0); // Only first new record gets "yes"
+
+            service.Create(detail);
+        }
+    }
+
+    public class QuoteDetailJson
+    {
+        public int linenumber { get; set; }
+        public decimal priceperunit { get; set; }
+        public string productname { get; set; }
+        public string productnumber { get; set; }
+        public int quantity { get; set; }
+        public string quote { get; set; }
+        public string quotedetailname { get; set; }
+        public bool? extwarentyisfree { get; set; }
+    }
+}
