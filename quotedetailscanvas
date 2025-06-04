@@ -1,143 +1,122 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Query;
+using System.Text.Json;
 
-public class ProcessQuoteDetailsPlugin : IPlugin
+namespace MyPluginNamespace
 {
-    public void Execute(IServiceProvider serviceProvider)
+    public class QuoteDetailSyncPlugin : IPlugin
     {
-        // CRM services
-        IPluginExecutionContext context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
-        IOrganizationServiceFactory factory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
-        IOrganizationService service = factory.CreateOrganizationService(context.UserId);
-        ITracingService tracing = (ITracingService)serviceProvider.GetService(typeof(ITracingService));
-
-        // Check input
-        if (!context.InputParameters.Contains("QuoteDetailsJson"))
-            throw new InvalidPluginExecutionException("QuoteDetailsJson input parameter is missing.");
-
-        string jsonInput = context.InputParameters["QuoteDetailsJson"].ToString();
-
-        // Deserialize JSON input
-        var newQuoteDetails = JsonSerializer.Deserialize<List<QuoteDetailJson>>(jsonInput, new JsonSerializerOptions
+        public void Execute(IServiceProvider serviceProvider)
         {
-            PropertyNameCaseInsensitive = true
-        });
+            IPluginExecutionContext context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
+            IOrganizationServiceFactory serviceFactory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
+            IOrganizationService service = serviceFactory.CreateOrganizationService(context.UserId);
+            ITracingService tracing = (ITracingService)serviceProvider.GetService(typeof(ITracingService));
 
-        if (newQuoteDetails == null || newQuoteDetails.Count == 0)
-            throw new InvalidPluginExecutionException("Quote details JSON is empty or invalid.");
-
-        // Parse quote ID
-        Guid quoteId = Guid.Parse(newQuoteDetails[0].Quote);
-
-        // Get existing quote details
-        QueryExpression existingQuery = new QueryExpression("new_quotedetail")
-        {
-            ColumnSet = new ColumnSet("new_linenumber", "new_recordstarting"),
-            Criteria = new FilterExpression
+            try
             {
-                Conditions =
+                if (!context.InputParameters.Contains("QuoteDetailJson"))
+                    throw new InvalidPluginExecutionException("Missing QuoteDetailJson input parameter.");
+
+                string jsonString = context.InputParameters["QuoteDetailJson"].ToString();
+                var newQuoteDetails = JsonSerializer.Deserialize<List<QuoteDetailInput>>(jsonString);
+
+                if (newQuoteDetails == null || !newQuoteDetails.Any())
+                    throw new InvalidPluginExecutionException("QuoteDetailJson is empty or invalid.");
+
+                Guid quoteId = new Guid(newQuoteDetails[0].Quote);
+                int newLineCounter = 1;
+
+                foreach (var item in newQuoteDetails)
                 {
-                    new ConditionExpression("new_quoteid", ConditionOperator.Equal, quoteId)
-                }
-            },
-            Orders = { new OrderExpression("new_linenumber", OrderType.Descending) }
-        };
+                    Entity newDetail = new Entity("new_quotedetail");
+                    newDetail["new_name"] = item.QuoteDetailName;
+                    newDetail["new_quoteid"] = new EntityReference("quote", quoteId);
+                    newDetail["new_priceperunit"] = new Money(item.PricePerUnit);
+                    newDetail["new_quantity"] = item.Quantity;
+                    newDetail["new_linenumber"] = newLineCounter;
+                    newDetail["new_recordstarting"] = (newLineCounter == 1);
+                    newDetail["new_productname"] = item.ProductName;
+                    newDetail["new_productnumber"] = item.ProductNumber;
 
-        EntityCollection existingDetails = service.RetrieveMultiple(existingQuery);
-
-        // Determine max existing linenumber
-        int maxLineNumber = existingDetails.Entities.Any()
-            ? existingDetails.Entities.Max(e => e.GetAttributeValue<int>("new_linenumber"))
-            : 0;
-
-        int newCount = newQuoteDetails.Count;
-
-        // Shift non-recordstarting existing records
-        foreach (var entity in existingDetails.Entities)
-        {
-            bool isStarting = entity.Contains("new_recordstarting") && entity.GetAttributeValue<bool>("new_recordstarting");
-            if (!isStarting)
-            {
-                int oldLineNumber = entity.GetAttributeValue<int>("new_linenumber");
-                entity["new_linenumber"] = oldLineNumber + newCount;
-                service.Update(entity);
-            }
-        }
-
-        // Create new quote detail records
-        for (int i = 0; i < newQuoteDetails.Count; i++)
-        {
-            var item = newQuoteDetails[i];
-            Entity newDetail = new Entity("new_quotedetail");
-
-            newDetail["new_name"] = item.QuoteDetailName;
-            newDetail["new_quoteid"] = new EntityReference("quote", quoteId);
-            newDetail["new_priceperunit"] = new Money(item.PricePerUnit);
-            newDetail["new_quantity"] = item.Quantity;
-            newDetail["new_linenumber"] = maxLineNumber + i + 1;
-            newDetail["new_recordstarting"] = (i == 0); // first one only
-
-            newDetail["new_productname"] = item.ProductName;
-            newDetail["new_productnumber"] = item.ProductNumber;
-
-            // Lookup Product by productnumber
-            QueryExpression productQuery = new QueryExpression("product")
-            {
-                ColumnSet = new ColumnSet("productid"),
-                Criteria = new FilterExpression
-                {
-                    Conditions =
+                    try
                     {
-                        new ConditionExpression("productnumber", ConditionOperator.Equal, item.ProductNumber)
+                        QueryExpression productQuery = new QueryExpression("product")
+                        {
+                            ColumnSet = new ColumnSet("productid"),
+                            Criteria = new FilterExpression
+                            {
+                                Conditions =
+                                {
+                                    new ConditionExpression("productnumber", ConditionOperator.Equal, item.ProductNumber)
+                                }
+                            }
+                        };
+
+                        EntityCollection productResults = service.RetrieveMultiple(productQuery);
+                        if (productResults.Entities.Any())
+                        {
+                            var product = productResults.Entities.First();
+                            newDetail["productid"] = new EntityReference("product", product.Id);
+                        }
                     }
+                    catch (Exception ex)
+                    {
+                        tracing.Trace($"Product lookup failed for '{item.ProductNumber}': {ex.Message}");
+                    }
+
+                    service.Create(newDetail);
+                    newLineCounter++;
                 }
-            };
 
-            EntityCollection productResults = service.RetrieveMultiple(productQuery);
-            if (productResults.Entities.Any())
-            {
-                var product = productResults.Entities.First();
-                newDetail["productid"] = new EntityReference("product", product.Id);
-            }
-            else
-            {
-                throw new InvalidPluginExecutionException($"Product with number '{item.ProductNumber}' not found.");
-            }
+                // Reorder all existing quotedetails
+                QueryExpression reorderQuery = new QueryExpression("new_quotedetail")
+                {
+                    ColumnSet = new ColumnSet("new_linenumber", "new_recordstarting"),
+                    Criteria = new FilterExpression
+                    {
+                        Conditions =
+                        {
+                            new ConditionExpression("new_quoteid", ConditionOperator.Equal, quoteId)
+                        }
+                    },
+                    Orders = { new OrderExpression("new_linenumber", OrderType.Ascending) }
+                };
 
-            service.Create(newDetail);
+                EntityCollection allDetails = service.RetrieveMultiple(reorderQuery);
+
+                int reorderCounter = 1;
+                foreach (var detail in allDetails.Entities.OrderBy(e => e.GetAttributeValue<int>("new_linenumber")))
+                {
+                    bool isStarting = detail.Contains("new_recordstarting") && detail.GetAttributeValue<bool>("new_recordstarting");
+                    if (isStarting && reorderCounter != 1)
+                    {
+                        reorderCounter++;
+                        continue; // skip updating recordstarting = true
+                    }
+
+                    detail["new_linenumber"] = reorderCounter++;
+                    service.Update(detail);
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidPluginExecutionException($"Plugin error: {ex.Message}", ex);
+            }
         }
-    }
 
-    // JSON model
-    public class QuoteDetailJson
-    {
-        [JsonPropertyName("linenumber")]
-        public int LineNumber { get; set; }
-
-        [JsonPropertyName("priceperunit")]
-        public decimal PricePerUnit { get; set; }
-
-        [JsonPropertyName("productname")]
-        public string ProductName { get; set; }
-
-        [JsonPropertyName("productnumber")]
-        public string ProductNumber { get; set; }
-
-        [JsonPropertyName("quantity")]
-        public int Quantity { get; set; }
-
-        [JsonPropertyName("quote")]
-        public string Quote { get; set; }
-
-        [JsonPropertyName("quotedetailname")]
-        public string QuoteDetailName { get; set; }
-
-        [JsonPropertyName("extwarentyisfree")]
-        public bool? ExtWarrantyIsFree { get; set; }
+        public class QuoteDetailInput
+        {
+            public string QuoteDetailName { get; set; }
+            public string ProductName { get; set; }
+            public string ProductNumber { get; set; }
+            public decimal PricePerUnit { get; set; }
+            public int Quantity { get; set; }
+            public int LineNumber { get; set; }
+            public string Quote { get; set; }
+        }
     }
 }
