@@ -1,28 +1,45 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Xrm.Sdk;
+using Microsoft.Xrm.Sdk.Query;
+
 public class ProcessQuoteDetailsPlugin : IPlugin
 {
     public void Execute(IServiceProvider serviceProvider)
     {
+        // Get plugin context and service
         IPluginExecutionContext context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
         IOrganizationServiceFactory factory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
         IOrganizationService service = factory.CreateOrganizationService(context.UserId);
 
+        // Input parameter from action
         if (!context.InputParameters.Contains("QuoteDetailsJson"))
             throw new InvalidPluginExecutionException("QuoteDetailsJson input parameter is missing.");
 
         string jsonInput = context.InputParameters["QuoteDetailsJson"].ToString();
-        var newQuoteDetails = JsonConvert.DeserializeObject<List<QuoteDetailJson>>(jsonInput);
+
+        var newQuoteDetails = JsonSerializer.Deserialize<List<QuoteDetailJson>>(jsonInput, new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
+
         if (newQuoteDetails == null || newQuoteDetails.Count == 0)
             throw new InvalidPluginExecutionException("Quote details JSON is empty or invalid.");
 
-        Guid quoteId = Guid.Parse(newQuoteDetails.First().quote);
+        // Get the quote ID from first item
+        Guid quoteId = Guid.Parse(newQuoteDetails[0].Quote);
 
-        // Fetch existing quote detail records for this quote
+        // Retrieve existing records for this quote
         QueryExpression existingQuery = new QueryExpression("new_quotedetail")
         {
             ColumnSet = new ColumnSet("new_linenumber", "new_recordstarting"),
             Criteria = new FilterExpression
             {
-                Conditions = {
+                Conditions =
+                {
                     new ConditionExpression("new_quoteid", ConditionOperator.Equal, quoteId)
                 }
             },
@@ -31,53 +48,69 @@ public class ProcessQuoteDetailsPlugin : IPlugin
 
         EntityCollection existingDetails = service.RetrieveMultiple(existingQuery);
 
-        // Find max line number
+        // Determine max existing linenumber
         int maxLineNumber = existingDetails.Entities.Any()
-            ? existingDetails.Entities.Max(x => x.GetAttributeValue<int>("new_linenumber"))
+            ? existingDetails.Entities.Max(e => e.GetAttributeValue<int>("new_linenumber"))
             : 0;
 
-        int insertCount = newQuoteDetails.Count;
+        int newCount = newQuoteDetails.Count;
 
-        // Update existing records (EXCLUDING recordstarting = true)
-        foreach (var record in existingDetails.Entities)
+        // Shift existing records that are NOT recordstarting = true
+        foreach (var entity in existingDetails.Entities)
         {
-            bool isStart = record.GetAttributeValue<bool>("new_recordstarting");
-            if (!isStart)
+            bool isStarting = entity.Contains("new_recordstarting") && entity.GetAttributeValue<bool>("new_recordstarting");
+            if (!isStarting)
             {
-                int currentLine = record.GetAttributeValue<int>("new_linenumber");
-                record["new_linenumber"] = currentLine + insertCount;
-                service.Update(record);
+                int oldLineNumber = entity.GetAttributeValue<int>("new_linenumber");
+                entity["new_linenumber"] = oldLineNumber + newCount;
+                service.Update(entity);
             }
         }
 
-        // Create new records
+        // Create new quote detail records
         for (int i = 0; i < newQuoteDetails.Count; i++)
         {
             var item = newQuoteDetails[i];
-            Entity detail = new Entity("new_quotedetail");
+            Entity newDetail = new Entity("new_quotedetail");
 
-            detail["new_name"] = item.quotedetailname;
-            detail["new_quoteid"] = new EntityReference("quote", quoteId);
-            detail["new_productname"] = item.productname;
-            detail["new_productnumber"] = item.productnumber;
-            detail["new_priceperunit"] = new Money(item.priceperunit);
-            detail["new_quantity"] = item.quantity;
-            detail["new_linenumber"] = maxLineNumber + i + 1;
-            detail["new_recordstarting"] = (i == 0); // Only first new record gets "yes"
+            newDetail["new_name"] = item.QuoteDetailName;
+            newDetail["new_quoteid"] = new EntityReference("quote", quoteId);
+            newDetail["new_productname"] = item.ProductName;
+            newDetail["new_productnumber"] = item.ProductNumber;
+            newDetail["new_priceperunit"] = new Money(item.PricePerUnit);
+            newDetail["new_quantity"] = item.Quantity;
+            newDetail["new_linenumber"] = maxLineNumber + i + 1;
+            newDetail["new_recordstarting"] = (i == 0); // only first gets true
 
-            service.Create(detail);
+            service.Create(newDetail);
         }
     }
 
+    // Model for System.Text.Json
     public class QuoteDetailJson
     {
-        public int linenumber { get; set; }
-        public decimal priceperunit { get; set; }
-        public string productname { get; set; }
-        public string productnumber { get; set; }
-        public int quantity { get; set; }
-        public string quote { get; set; }
-        public string quotedetailname { get; set; }
-        public bool? extwarentyisfree { get; set; }
+        [JsonPropertyName("linenumber")]
+        public int LineNumber { get; set; }
+
+        [JsonPropertyName("priceperunit")]
+        public decimal PricePerUnit { get; set; }
+
+        [JsonPropertyName("productname")]
+        public string ProductName { get; set; }
+
+        [JsonPropertyName("productnumber")]
+        public string ProductNumber { get; set; }
+
+        [JsonPropertyName("quantity")]
+        public int Quantity { get; set; }
+
+        [JsonPropertyName("quote")]
+        public string Quote { get; set; }
+
+        [JsonPropertyName("quotedetailname")]
+        public string QuoteDetailName { get; set; }
+
+        [JsonPropertyName("extwarentyisfree")]
+        public bool? ExtWarrantyIsFree { get; set; }
     }
 }
